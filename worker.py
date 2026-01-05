@@ -110,6 +110,7 @@ async def process_message(
         if 200 <= resp.status_code < 300:
             await r.xack(stream, GROUP, msg_id)
             events_processed.labels(stream=stream, type=event_type).inc()
+            await dlq.clean_event(meta["id"])
             return None
 
         events_failed.labels(stream=stream, type=event_type, reason=f"http_{resp.status_code}").inc()
