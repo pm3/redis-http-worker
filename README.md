@@ -136,7 +136,37 @@ Configure the worker using environment variables:
 | `METRICS_PORT` | `9000` | Prometheus metrics port |
 | `CONNECT_TIMEOUT` | `2.0` | HTTP connection timeout (seconds) |
 | `READ_TIMEOUT` | `60.0` | HTTP read timeout (seconds) |
-| `DLQ_URI` | `http://localhost:8000/events/dlq` | Dead letter queue endpoint |
+
+### Dead Letter Queue (DLQ) Configuration
+
+The DLQ manager supports three modes for handling failed events:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DLQ_URI` | - | HTTP endpoint for sending failed events |
+| `DLQ_DB_CONNECTION` | - | SQLAlchemy async database connection string |
+| `DLQ_DB_TABLE` | `dlq` | Database table name for storing failed events |
+| `EVENT_DB_TABLE` | - | Source event table to clean after moving to DLQ |
+
+**Mode Priority:**
+1. **Database** (if `DLQ_DB_CONNECTION` is set) - stores events in database and optionally cleans source table
+2. **HTTP** (if `DLQ_URI` is set) - sends events to HTTP endpoint
+3. **Console** (default) - prints events to stdout with `DLQ:` prefix
+
+**DLQ Database Table Schema:**
+```sql
+CREATE TABLE dlq (
+    id VARCHAR PRIMARY KEY,
+    type VARCHAR NOT NULL,
+    reason TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+```
+
+**Event Cleanup:** When `DLQ_DB_CONNECTION` and `EVENT_DB_TABLE` are set, the worker automatically deletes the original event from the source table after moving it to DLQ:
+```sql
+DELETE FROM {EVENT_DB_TABLE} WHERE event_id = :event_id
+```
 
 ### Test Configuration
 
