@@ -1,0 +1,16 @@
+[project]
+name = "http-worker"
+version = "0.1.0"
+description = "A robust Redis Streams-based HTTP worker with retry logic, dead letter queue, and Prometheus metrics"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.1",
+    "prometheus-client>=0.23.1",
+    "redis>=7.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "aiohttp>=3.9.0",
+]
