@@ -10,6 +10,7 @@ import redis.asyncio as redis
 from prometheus_client import start_http_server
 
 from metrics import event_age_seconds, event_processing_duration, events_processed, events_failed
+from dlq import DlqManager
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -22,8 +23,6 @@ STREAMS = [f"events:{s}" for s in STREAMS_STRING.split(",")]
 
 DEFAULT_WORKER_URI = os.getenv("DEFAULT_WORKER_URI", "http://localhost:8000/events/[EVENT_TYPE]")
 METRICS_PORT = int(os.getenv("METRICS_PORT", "9000"))
-
-DLQ_URI = os.getenv("DLQ_URI", "http://localhost:8000/events/dlq")
 
 # timeouts
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "2.0"))
@@ -57,23 +56,6 @@ async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, 
     await r.zadd("events:retry:delays", {retry_id: next_attempt_ts})
     print(f"Scheduled retry for event {meta['id']} in {delay} seconds", flush=True)
 
-async def dlq(http: httpx.AsyncClient, meta: dict, payload: str, reason: str):
-    if DLQ_URI:
-        if payload.startswith("{") or payload.startswith("["):
-            try:
-                payload = json.dumps(json.loads(payload))
-            except:
-                pass
-
-        data = {
-            "id": meta.get("id", ""),
-            "type": meta.get("type", "unknown"),
-            "reason": reason,
-            "payload": payload,
-        }
-        await http.post(DLQ_URI, json=data)
-    print(f"DLQ'd event {meta['id']} type={meta['type']} to {DLQ_URI}", flush=True)
-
 async def check_ready_host(http: httpx.AsyncClient, url: str) -> bool:
     try:
         resp = await http.options(url, timeout=1, follow_redirects=False)
@@ -86,6 +68,7 @@ async def check_ready_host(http: httpx.AsyncClient, url: str) -> bool:
 async def process_message(
     r: redis.Redis,
     http: httpx.AsyncClient,
+    dlq: DlqManager,
     stream: str,
     msg_id: str,
     fields: dict
@@ -146,7 +129,7 @@ async def process_message(
 
         # non-retryable
         await r.xack(stream, GROUP, msg_id)
-        await dlq(http, meta, payload, f"http_{resp.status_code}")
+        await dlq.send_to_dlq(meta, payload, f"http_{resp.status_code}")
         return None
 
     except Exception as e:
@@ -156,7 +139,7 @@ async def process_message(
         await r.xadd(stream, {"meta": json.dumps(meta), "payload": payload})
         return url
 
-async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient):
+async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, dlq: DlqManager):
     await ensure_group(r, stream)
 
     consumer = f"{CONSUMER_PREFIX}-{stream}-{os.getpid()}"
@@ -186,7 +169,7 @@ async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient):
         for _, messages in res:
             for msg_id, fields in messages:
                 # ALWAYS process sequentially per stream:
-                wait_ready_host = await process_message(r, http, stream, msg_id, fields)
+                wait_ready_host = await process_message(r, http, dlq, stream, msg_id, fields)
 
 
 async def scheduler_loop(r: redis.Redis):
@@ -229,11 +212,12 @@ async def main():
     timeout = httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT)
 
     async with httpx.AsyncClient(timeout=timeout) as http:
+        dlq = DlqManager(http)
         tasks = []
 
         # one consumer task per stream
         for s in STREAMS:
-            tasks.append(asyncio.create_task(consume_stream(s, r, http)))
+            tasks.append(asyncio.create_task(consume_stream(s, r, http, dlq)))
 
         # scheduler task
         tasks.append(asyncio.create_task(scheduler_loop(r)))
