@@ -7,7 +7,8 @@ import signal
 
 import httpx
 import redis.asyncio as redis
-from prometheus_client import start_http_server
+from aiohttp import web
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from metrics import event_age_seconds, event_processing_duration, events_processed, events_failed
 from dlq import DlqManager
@@ -43,6 +44,18 @@ async def ensure_group(r: redis.Redis, stream: str):
         if "BUSYGROUP" not in str(e):
             raise
 
+async def wait_for_redis(r: redis.Redis):
+    time_sleep = 1
+    while True:
+        try:
+            await r.ping()
+            break
+        except Exception as e:
+            print(f"Failed to connect to Redis: {e}", flush=True)
+            await asyncio.sleep(time_sleep)
+            if time_sleep < 10:
+                time_sleep+=1
+
 async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, delay: int):
 
     next_attempt_ts = now_ts() + delay
@@ -56,6 +69,7 @@ async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, 
 
     await r.zadd("events:retry:delays", {retry_id: next_attempt_ts})
     print(f"Scheduled retry for event {meta['id']} in {delay} seconds", flush=True)
+
 
 async def check_ready_host(http: httpx.AsyncClient, url: str) -> bool:
     try:
@@ -157,23 +171,27 @@ async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, d
                 await asyncio.sleep(1)
                 continue
 
-        # XREADGROUP returns: [(stream_name, [(id, {field:value})...])]
-        res = await r.xreadgroup(
-            GROUP,
-            consumer,
-            streams={stream: ">"},
-            count=1,       # ALWAYS ONE event from this queue
-            block=5000     # ms
-        )
+        try:
+            # XREADGROUP returns: [(stream_name, [(id, {field:value})...])]
+            res = await r.xreadgroup(
+                GROUP,
+                consumer,
+                streams={stream: ">"},
+                count=1,       # ALWAYS ONE event from this queue
+                block=5000     # ms
+            )
 
-        if not res:
-            continue
+            if not res:
+                continue
 
-        for _, messages in res:
-            for msg_id, fields in messages:
-                # ALWAYS process sequentially per stream:
-                wait_ready_host = await process_message(r, http, dlq, stream, msg_id, fields)
+            for _, messages in res:
+                for msg_id, fields in messages:
+                    # ALWAYS process sequentially per stream:
+                    wait_ready_host = await process_message(r, http, dlq, stream, msg_id, fields)
 
+        except Exception as e:
+            print(f"Failed to read message from stream {stream}: {e}", flush=True)
+            await wait_for_redis(r)
 
 async def scheduler_loop(r: redis.Redis):
     """
@@ -181,36 +199,59 @@ async def scheduler_loop(r: redis.Redis):
     Runs once per second.
     """
     while not shutdown_event.is_set():
-        now = now_ts()
-        due_ids = await r.zrangebyscore("events:retry:delays", 0, now, start=0, num=200)
 
-        for retry_id in due_ids:
-            msg = await r.xrange("events:retry", min=retry_id, max=retry_id)
-            if not msg:
+        try:
+            now = now_ts()
+            due_ids = await r.zrangebyscore("events:retry:delays", 0, now, start=0, num=200)
+
+            for retry_id in due_ids:
+                msg = await r.xrange("events:retry", min=retry_id, max=retry_id)
+                if not msg:
+                    await r.zrem("events:retry:delays", retry_id)
+                    continue
+
+                _, fields = msg[0]
+                meta = json.loads(fields["meta"])
+                stream = fields.get("stream", "events:default")
+                payload = fields.get("payload", "")
+
+                print(f"Moved retry for event {meta['id']} to {stream}", flush=True)
+                await r.xadd(stream, {
+                    "meta": json.dumps(meta),
+                    "payload": payload
+                })            
                 await r.zrem("events:retry:delays", retry_id)
-                continue
 
-            _, fields = msg[0]
-            meta = json.loads(fields["meta"])
-            stream = fields.get("stream", "events:default")
-            payload = fields.get("payload", "")
+            await asyncio.sleep(1.0)
+        except Exception as e:
+            print(f"Scheduler loop failed: {e}", flush=True)
+            await wait_for_redis(r)
 
-            print(f"Moved retry for event {meta['id']} to {stream}", flush=True)
-            await r.xadd(stream, {
-                "meta": json.dumps(meta),
-                "payload": payload
-            })            
-            await r.zrem("events:retry:delays", retry_id)
+async def health(request):
+    return web.Response(text="{\"status\": \"ok\"}", headers={"Content-Type": "application/json"})
 
-        await asyncio.sleep(1.0)
-
+async def metrics(request):
+    data = generate_latest()
+    return web.Response(body=data, headers={"Content-Type": CONTENT_TYPE_LATEST})
 
 async def main():
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, decode_responses=True)
 
-    # Ensure groups exist upfront
+    # wait for redis to be ready
+    await wait_for_redis(r)
+    # ensure groups exist upfront
     for s in STREAMS:
         await ensure_group(r, s)
+
+    # start metrics server
+    app = web.Application()
+    app.router.add_get("/health", health)
+    app.router.add_get("/metrics", metrics)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", METRICS_PORT)
+    await site.start()
+    print(f"Server running on :{METRICS_PORT}", flush=True)
 
     timeout = httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT)
 
@@ -233,5 +274,4 @@ def _handle_sig(*_):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
-    start_http_server(METRICS_PORT)
     asyncio.run(main())
