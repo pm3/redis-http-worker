@@ -5,6 +5,8 @@ description = "A robust Redis Streams-based HTTP worker with retry logic, dead l
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "aiomysql>=0.2.0",
+    "cryptography>=44.0.0",
     "httpx>=0.28.1",
     "prometheus-client>=0.23.1",
     "redis>=7.1.0",

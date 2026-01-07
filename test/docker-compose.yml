@@ -23,17 +23,42 @@ services:
     networks:
       - zooza-network
 
+  mysql:
+    image: mysql:8.0
+    container_name: zooza-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=zooza
+      - MYSQL_USER=zooza
+      - MYSQL_PASSWORD=zooza
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - zooza-network
+
   worker:
     build: ../
     container_name: zooza-worker
     depends_on:
       redis:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - METRICS_PORT=9000
       - DEFAULT_WORKER_URI=http://http-server:8000/events/[EVENT_TYPE]
+      - DLQ_DB_CONNECTION=mysql+aiomysql://zooza:zooza@mysql:3306/zooza
+      - DLQ_DB_TABLE=dlq
+      - EVENT_DB_TABLE=events
     ports:
       - "9000:9000"  # Prometheus metrics
     command: python worker.py
@@ -60,12 +85,15 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - SERVER_PORT=8000
       - SERVER_HOST=http-server
       - NUM_EVENTS=500
+      - DB_CONNECTION=mysql+aiomysql://zooza:zooza@mysql:3306/zooza
     command: >
       sh -c "sleep 1 && python test_event_generator.py"
     networks:
@@ -74,3 +102,6 @@ services:
 networks:
   zooza-network:
     driver: bridge
+
+volumes:
+  mysql-data:

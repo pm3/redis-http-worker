@@ -16,7 +16,9 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
+
 count = { "ok": 0 }
+count_lock = asyncio.Lock()
 
 async def http_handler(request: web.Request) -> web.Response:
     """
@@ -30,11 +32,13 @@ async def http_handler(request: web.Request) -> web.Response:
     # Read payload
     payload = await request.text()
 
-    count["ok"] += 1
-    if count["ok"] >=276:
+    async with count_lock:
+        akt = count["ok"] + 1
+        count["ok"] = akt
+        
+    if akt == 276:
         print(f"✅ Simulated deployment: {count['ok']} = {event_id}", flush=True)
         exit(0)
-
     if count["ok"] == 123:
         print(f"✅ Simulated retry-after: 20 = {event_id}", flush=True)
         return web.Response(status=400, text="ERROR: retry-after: 20", headers={"Retry-After": "20"})

@@ -1,15 +1,18 @@
 import json
 import os
 import httpx
-from sqlalchemy import create_async_engine, text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import text
 
 class DlqManager:
-    def init(self, http: httpx.AsyncClient):
+    def __init__(self, http: httpx.AsyncClient):
         DLQ_URI = os.getenv("DLQ_URI")
         DLQ_DB_CONNECTION = os.getenv("DLQ_DB_CONNECTION")
         DLQ_DB_TABLE = os.getenv("DLQ_DB_TABLE", "dlq")
         DLQ_CLEAN_TABLE = os.getenv("EVENT_DB_TABLE")
         self.executor = self.send_to_console
+        self.engine = None
+        self.sql_clean = None
         if DLQ_URI:
             self.http = http
             self.dlq_uri = DLQ_URI
@@ -17,7 +20,8 @@ class DlqManager:
         if DLQ_DB_CONNECTION:
             self.engine = create_async_engine(DLQ_DB_CONNECTION)
             self.sql_insert = text(f"INSERT INTO {DLQ_DB_TABLE} (id, type, reason, payload) VALUES (:id, :type, :reason, :payload)")
-            self.sql_clean = text(f"DELETE FROM {DLQ_CLEAN_TABLE} WHERE event_id = :event_id")
+            if DLQ_CLEAN_TABLE:
+                self.sql_clean = text(f"DELETE FROM {DLQ_CLEAN_TABLE} WHERE id = :id")
             self.executor = self.send_to_db
         
     async def send_to_dlq(self, event: dict, payload: str, reason: str):
@@ -47,7 +51,7 @@ class DlqManager:
                 "reason": reason,
                 "payload": payload,
             }
-            await conn.execute(self.sql_insert, params=data)
+            await conn.execute(self.sql_insert, data)
             await conn.commit()
 
     async def send_to_console(self, event: dict, payload: str, reason: str):
@@ -60,7 +64,10 @@ class DlqManager:
         print(f"DLQ:{json.dumps(data)}", flush=True)
 
     async def clean_event(self, event_id: str | None):
-        if self.sql_clean and event_id:
-            async with self.engine.connect() as conn:
-                await conn.execute(self.sql_clean, params={"event_id": event_id})
-                await conn.commit()
+        if self.sql_clean is not None and event_id is not None:
+            try:
+                async with self.engine.connect() as conn:
+                    await conn.execute(self.sql_clean, {"id": event_id})
+                    await conn.commit()
+            except Exception as e:
+                print(f"Error cleaning event {event_id}: {e}", flush=True)

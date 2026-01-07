@@ -14,6 +14,7 @@ from dlq import DlqManager
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 GROUP = os.getenv("GROUP", "workers")
 CONSUMER_PREFIX = os.getenv("CONSUMER_PREFIX", "c")
@@ -135,6 +136,7 @@ async def process_message(
 
     except Exception as e:
         # retryable
+        print(f"event {meta['id']} type={event_type} error: {e}", flush=True)
         events_failed.labels(stream=stream, type=event_type, reason=f"http_timeout_or_conn_error").inc()
         await r.xack(stream, GROUP, msg_id)
         await r.xadd(stream, {"meta": json.dumps(meta), "payload": payload})
@@ -204,7 +206,7 @@ async def scheduler_loop(r: redis.Redis):
 
 
 async def main():
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, decode_responses=True)
 
     # Ensure groups exist upfront
     for s in STREAMS:
