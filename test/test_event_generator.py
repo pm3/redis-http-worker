@@ -36,7 +36,7 @@ async def create_tables(engine: AsyncEngine):
         # Create events table
         await conn.execute(text("""
             CREATE TABLE events (
-                id varchar(255) PRIMARY KEY,
+                id int PRIMARY KEY,
                 type VARCHAR(255) NOT NULL,
                 stream VARCHAR(255) NOT NULL,
                 dlq BOOLEAN NOT NULL DEFAULT FALSE,
@@ -50,7 +50,7 @@ async def create_tables(engine: AsyncEngine):
     print("=" * 70, flush=True)
 
 
-async def insert_event_to_mysql(engine: AsyncEngine, event_id: str, event_type: str, 
+async def insert_event_to_mysql(engine: AsyncEngine, event_id: int, event_type: str, 
                                  stream: str, payload: str):
     """Insert event into MySQL database."""
     async with engine.begin() as conn:
@@ -69,7 +69,7 @@ async def select_events(engine: AsyncEngine) -> int:
             print(f"remaining event: {row[0]}", flush=True)
 
 
-async def publish_event_to_redis(r: redis.Redis, event_id: str, event_type: str, 
+async def publish_event_to_redis(r: redis.Redis, event_id: int, event_type: str, 
                                   data: str, stream: str = "events:default", 
                                   retries_left: int = 30):
     created_at = datetime.now(UTC).isoformat()
@@ -79,6 +79,7 @@ async def publish_event_to_redis(r: redis.Redis, event_id: str, event_type: str,
         "type": event_type,
         "createdAt": created_at,
     }
+    print(json.dumps(meta), flush=True)
     
     await r.xadd(stream, {
         "meta": json.dumps(meta),
@@ -88,14 +89,14 @@ async def publish_event_to_redis(r: redis.Redis, event_id: str, event_type: str,
     return created_at
 
 
-async def event_generator(r: redis.Redis, engine: AsyncEngine, sent_event_ids: Set[str]):
+async def event_generator(r: redis.Redis, engine: AsyncEngine):
     print(f"\n📤 Starting event generator ({NUM_EVENTS} events)...")
     
     event_types = ["user_created", "user_updated", "order_placed", "payment_processed"]
     streams = ["events:critical", "events:fast", "events:default", "events:slow"]
     
     for i in range(NUM_EVENTS):
-        event_id = str(i)
+        event_id = i
         event_type = random.choice(event_types)
         data = json.dumps({
             "index": i,
@@ -110,7 +111,6 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine, sent_event_ids: S
         # Insert to MySQL
         await insert_event_to_mysql(engine, event_id, event_type, stream, data)
         
-        sent_event_ids.add(event_id)
         print(f"✅ Sent event {i} of {NUM_EVENTS}", flush=True)
 
     print(f"✅ Event generator completed - sent {NUM_EVENTS} events", flush=True)
@@ -169,10 +169,8 @@ async def main():
         await r.aclose()
         return
     
-    sent_event_ids: Set[str] = set()
-    
     try:
-        await event_generator(r, engine, sent_event_ids)       
+        await event_generator(r, engine)
     finally:
         await engine.dispose()
         await r.aclose()

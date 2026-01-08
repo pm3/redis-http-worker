@@ -94,7 +94,7 @@ async def process_message(
     # fields are strings if decode_responses=True
     now = time.time()
     meta = json.loads(fields["meta"])
-    event_id = meta.get("id", None)
+    event_id = str(meta["id"]) if "id" in meta else None
     payload = fields.get("payload", "")
     event_type = meta.get("type", "unknown")
 

@@ -63,11 +63,7 @@ class DlqManager:
         if self.engine is not None and event_id is not None:
             try:
                 async with self.engine.connect() as conn:
-                    result = await conn.execute(self.sql_clean, {"id": event_id})
-                    if result.rowcount == 0:
-                        print(f"event [event={event_id}] not found in database")
-                    else:
-                        print(f"event [event={event_id}] cleaned in database")
+                    await conn.execute(self.sql_clean, {"id": event_id})
                     await conn.commit()
             except Exception as e:
                 print(f"Error cleaning event {event_id}: {e}")
