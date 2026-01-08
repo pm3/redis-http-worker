@@ -32,41 +32,31 @@ async def create_tables(engine: AsyncEngine):
     async with engine.begin() as conn:
         # Drop tables if exist for clean test
         await conn.execute(text("DROP TABLE IF EXISTS events"))
-        await conn.execute(text("DROP TABLE IF EXISTS dlq"))
         
         # Create events table
         await conn.execute(text("""
             CREATE TABLE events (
-                id VARCHAR(255) PRIMARY KEY,
+                id varchar(255) PRIMARY KEY,
                 type VARCHAR(255) NOT NULL,
                 stream VARCHAR(255) NOT NULL,
-                created_at DATETIME NOT NULL,
+                dlq BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 payload TEXT
             )
         """))
         
-        # Create dlq table
-        await conn.execute(text("""
-            CREATE TABLE dlq (
-                id VARCHAR(255) PRIMARY KEY,
-                type VARCHAR(255) NOT NULL,
-                reason VARCHAR(255),
-                payload TEXT
-            )
-        """))
-
     print("=" * 70, flush=True)        
-    print("✅ Created MySQL tables: events, dlq", flush=True)
+    print("✅ Created MySQL tables: events", flush=True)
     print("=" * 70, flush=True)
 
 
 async def insert_event_to_mysql(engine: AsyncEngine, event_id: str, event_type: str, 
-                                 stream: str, created_at: str, payload: str):
+                                 stream: str, payload: str):
     """Insert event into MySQL database."""
     async with engine.begin() as conn:
         await conn.execute(
-            text("INSERT INTO events (id, type, stream, created_at, payload) VALUES (:id, :type, :stream, :created_at, :payload)"),
-            {"id": event_id, "type": event_type, "stream": stream, "created_at": created_at, "payload": payload}
+            text("INSERT INTO events (id, type, stream, payload) VALUES (:id, :type, :stream, :payload)"),
+            {"id": event_id, "type": event_type, "stream": stream, "payload": payload}
         )
 
 
@@ -77,15 +67,6 @@ async def select_events(engine: AsyncEngine) -> int:
         rows = result.fetchall()
         for row in rows:
             print(f"remaining event: {row[0]}", flush=True)
-
-
-async def select_dlq(engine: AsyncEngine) -> int:
-    print("🔍 Checking DLQ database...", flush=True)
-    async with engine.connect() as conn:
-        result = await conn.execute(text("SELECT * FROM dlq"))
-        rows = result.fetchall()
-        for row in rows:
-            print(f"remaining dlq: {row[0]} {row[1]} {row[2]} {row[3]}", flush=True)
 
 
 async def publish_event_to_redis(r: redis.Redis, event_id: str, event_type: str, 
@@ -127,9 +108,7 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine, sent_event_ids: S
         created_at = await publish_event_to_redis(r, event_id, event_type, data, stream)
         
         # Insert to MySQL
-        await insert_event_to_mysql(engine, event_id, event_type, stream,
-                                    datetime.fromisoformat(created_at).strftime("%Y-%m-%d %H:%M:%S"), 
-                                    data)
+        await insert_event_to_mysql(engine, event_id, event_type, stream, data)
         
         sent_event_ids.add(event_id)
         print(f"✅ Sent event {i} of {NUM_EVENTS}", flush=True)
@@ -160,9 +139,7 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine, sent_event_ids: S
     
     # Check events count with retries
     await select_events(engine)
-    await select_dlq(engine)
         
-
 
 async def main():
     print("=" * 70, flush=True)

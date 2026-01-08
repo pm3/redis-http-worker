@@ -8,7 +8,7 @@ A robust Redis Streams-based HTTP worker system with retry logic, metrics, and d
 - **Automatic Retries**: Configurable backoff strategy for failed events
 - **Dead Letter Queue (DLQ)**: Failed events are sent to DLQ endpoint
 - **Prometheus Metrics**: Monitor event processing, failures, and latency
-- **Scheduled Retries**: Support for delayed event retry with Retry-After header
+- **Scheduled Retries**: Support for delayed event retry with X-Retry-After header
 
 ## Architecture
 
@@ -256,8 +256,8 @@ Failed events are automatically retried:
 ### Network Errors (502, 503, 504)
 Events are immediately re-added to the stream and the worker waits for the target host to become available before processing more events.
 
-### User-Controlled Retry (400 with Retry-After)
-If the endpoint returns HTTP 400 with a `Retry-After` header (in seconds), the event is scheduled for retry after the specified delay.
+### User-Controlled Retry (400 with X-Retry-After)
+If the endpoint returns HTTP 400 with a `X-Retry-After` header (in seconds), the event is scheduled for retry after the specified delay.
 
 ### Non-Retryable Errors
 All other error status codes result in the event being sent to the Dead Letter Queue (DLQ).

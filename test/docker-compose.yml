@@ -57,8 +57,7 @@ services:
       - METRICS_PORT=9000
       - DEFAULT_WORKER_URI=http://http-server:8000/events/[EVENT_TYPE]
       - DLQ_DB_CONNECTION=mysql+aiomysql://zooza:zooza@mysql:3306/zooza
-      - DLQ_DB_TABLE=dlq
-      - EVENT_DB_TABLE=events
+      - DLQ_DB_TABLE=events
     ports:
       - "9000:9000"  # Prometheus metrics
     command: python worker.py

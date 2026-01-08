@@ -34,6 +34,9 @@ RETRYABLE_NOT_AVAILABLE = { 502, 503, 504 }
 
 shutdown_event = asyncio.Event()
 
+def print_msg(msg: str):
+    print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {msg}", flush=True)
+
 def now_ts() -> int:
     return int(time.time())
 
@@ -68,16 +71,16 @@ async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, 
     })
 
     await r.zadd("events:retry:delays", {retry_id: next_attempt_ts})
-    print(f"Scheduled retry for event {meta['id']} in {delay} seconds", flush=True)
+    print_msg(f"Scheduled retry for event {meta['id']} in {delay} seconds")
 
 
 async def check_ready_host(http: httpx.AsyncClient, url: str) -> bool:
     try:
         resp = await http.options(url, timeout=1, follow_redirects=False)
-        print(f"CHECK_READY_HOST: {url} {resp.status_code}", flush=True)
+        print_msg(f"Check ready host: {url} status={resp.status_code}")
         return resp.status_code in { 200, 204, 404, 405, 301, 302, 303, 307, 308 }
     except Exception as e:
-        print(f"CHECK_READY_HOST: {url} {e}", flush=True)
+        print_msg(f"Check ready host: {url} error={e}")
         return False
 
 async def process_message(
@@ -91,6 +94,7 @@ async def process_message(
     # fields are strings if decode_responses=True
     now = time.time()
     meta = json.loads(fields["meta"])
+    event_id = meta.get("id", None)
     payload = fields.get("payload", "")
     event_type = meta.get("type", "unknown")
 
@@ -108,10 +112,11 @@ async def process_message(
         "X-Event-Queue": meta.get("queue", stream),
         "Content-Type": "application/octet-stream",
     }
-    if "id" in meta:
-        headers["X-Event-Id"] = meta["id"]
+    if event_id:
+        headers["X-Event-Id"] = event_id
 
     try:
+        print_msg(f"Processing [event={event_id}] type={event_type} url={url}")
         resp = await http.post(
             url,
             content=payload.encode("utf-8"),  # if payload is text
@@ -120,21 +125,25 @@ async def process_message(
 
         duration = time.time() - now
         event_processing_duration.labels(type=event_type).observe(duration)
+        print_msg(f"Processed [event={event_id}] type={event_type} duration={duration} status={resp.status_code}")
+        if resp.status_code != 200:
+            print_msg(f"Error response [event={event_id}]: {resp.status_code}\\n{resp.text.replace('\n', '\\n').replace('\r', '')}")
 
         # success
         if 200 <= resp.status_code < 300:
             await r.xack(stream, GROUP, msg_id)
             events_processed.labels(stream=stream, type=event_type).inc()
-            await dlq.clean_event(meta["id"])
+            await dlq.clean_event(event_id)
             return None
 
         events_failed.labels(stream=stream, type=event_type, reason=f"http_{resp.status_code}").inc()
 
         # user retryable, retry-after is in seconds
-        retry_time = resp.headers.get("Retry-After", "")
+        retry_time = resp.headers.get("X-Retry-After", "")
         if resp.status_code==400 and retry_time.isdigit():
             await r.xack(stream, GROUP, msg_id)
             await schedule_retry(r, stream, meta, payload, int(retry_time))
+            print_msg(f"scheduled retry [event={event_id}] type={event_type} status={resp.status_code} retry_time={retry_time}")
             return None  
 
         # network retryable
@@ -145,12 +154,13 @@ async def process_message(
 
         # non-retryable
         await r.xack(stream, GROUP, msg_id)
-        await dlq.send_to_dlq(meta, payload, f"http_{resp.status_code}")
+        await dlq.send_to_dlq(event_id, event_type, payload, f"http_{resp.status_code}")
+        print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
         return None
 
     except Exception as e:
         # retryable
-        print(f"event {meta['id']} type={event_type} error: {e}", flush=True)
+        print_msg(f"[event={event_id}] type={event_type} error: {e}")
         events_failed.labels(stream=stream, type=event_type, reason=f"http_timeout_or_conn_error").inc()
         await r.xack(stream, GROUP, msg_id)
         await r.xadd(stream, {"meta": json.dumps(meta), "payload": payload})
@@ -190,7 +200,7 @@ async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, d
                     wait_ready_host = await process_message(r, http, dlq, stream, msg_id, fields)
 
         except Exception as e:
-            print(f"Failed to read message from stream {stream}: {e}", flush=True)
+            print_msg(f"Failed to read message from stream {stream}: {e}")
             await wait_for_redis(r)
 
 async def scheduler_loop(r: redis.Redis):
@@ -251,7 +261,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", METRICS_PORT)
     await site.start()
-    print(f"Server running on :{METRICS_PORT}", flush=True)
+    print_msg(f"Server running on :{METRICS_PORT}")
 
     timeout = httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT)
 

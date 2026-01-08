@@ -41,7 +41,7 @@ async def http_handler(request: web.Request) -> web.Response:
         exit(0)
     if count["ok"] == 123:
         print(f"✅ Simulated retry-after: 20 = {event_id}", flush=True)
-        return web.Response(status=400, text="ERROR: retry-after: 20", headers={"Retry-After": "20"})
+        return web.Response(status=400, text="ERROR: retry-after: 20", headers={"X-Retry-After": "20"})
 
     print(f"✓ Received: id={event_id}, type={event_type}, payload_len={len(payload)}")
 
