@@ -115,56 +115,54 @@ async def process_message(
     if event_id:
         headers["X-Event-Id"] = event_id
 
+    print_msg(f"Processing [event={event_id}] type={event_type} url={url}")
     try:
-        print_msg(f"Processing [event={event_id}] type={event_type} url={url}")
         resp = await http.post(
             url,
             content=payload.encode("utf-8"),  # if payload is text
             headers=headers,
         )
-
-        duration = time.time() - now
-        event_processing_duration.labels(type=event_type).observe(duration)
-        print_msg(f"Processed [event={event_id}] type={event_type} duration={duration} status={resp.status_code}")
-        if resp.status_code != 200:
-            print_msg(f"Error response [event={event_id}]: {resp.status_code}\\n{resp.text.replace('\n', '\\n').replace('\r', '')}")
-
-        # success
-        if 200 <= resp.status_code < 300:
-            await r.xack(stream, GROUP, msg_id)
-            events_processed.labels(stream=stream, type=event_type).inc()
-            await dlq.clean_event(event_id)
-            return None
-
-        events_failed.labels(stream=stream, type=event_type, reason=f"http_{resp.status_code}").inc()
-
-        # user retryable, retry-after is in seconds
-        retry_time = resp.headers.get("X-Retry-After", "")
-        if resp.status_code==400 and retry_time.isdigit():
-            await r.xack(stream, GROUP, msg_id)
-            await schedule_retry(r, stream, meta, payload, int(retry_time))
-            print_msg(f"scheduled retry [event={event_id}] type={event_type} status={resp.status_code} retry_time={retry_time}")
-            return None  
-
-        # network retryable
-        if resp.status_code in RETRYABLE_NOT_AVAILABLE:
-            await r.xack(stream, GROUP, msg_id)
-            await r.xadd(stream, {"meta": json.dumps(meta), "payload": payload})
-            return url
-
-        # non-retryable
-        await r.xack(stream, GROUP, msg_id)
-        await dlq.send_to_dlq(event_id, event_type, payload, f"http_{resp.status_code}")
-        print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
-        return None
-
     except Exception as e:
         # retryable
         print_msg(f"[event={event_id}] type={event_type} error: {e}")
+        await r.xack(stream, GROUP, msg_id)
+        await r.xadd(stream, {"meta": fields["meta"], "payload": fields["payload"]})
         events_failed.labels(stream=stream, type=event_type, reason=f"http_timeout_or_conn_error").inc()
+        return url
+
+    duration = time.time() - now
+    print_msg(f"Processed [event={event_id}] type={event_type} duration={duration} status={resp.status_code}")
+
+    # success
+    if 200 <= resp.status_code < 300:
+        await r.xack(stream, GROUP, msg_id)
+        event_processing_duration.labels(type=event_type).observe(duration)
+        events_processed.labels(stream=stream, type=event_type).inc()
+        await dlq.clean_event(event_id)
+        return None
+
+    print_msg(f"Error response [event={event_id}]: {resp.status_code}\\n{resp.text.replace('\n', '\\n').replace('\r', '')}")
+    events_failed.labels(stream=stream, type=event_type, reason=f"http_{resp.status_code}").inc()
+
+    # user retryable, retry-after is in seconds
+    retry_time = resp.headers.get("X-Retry-After", "")
+    if resp.status_code==400 and retry_time.isdigit():
+        await r.xack(stream, GROUP, msg_id)
+        await schedule_retry(r, stream, meta, payload, int(retry_time))
+        print_msg(f"scheduled retry [event={event_id}] type={event_type} status={resp.status_code} retry_time={retry_time}")
+        return None  
+
+    # network retryable
+    if resp.status_code in RETRYABLE_NOT_AVAILABLE:
         await r.xack(stream, GROUP, msg_id)
         await r.xadd(stream, {"meta": json.dumps(meta), "payload": payload})
         return url
+
+    # non-retryable
+    await r.xack(stream, GROUP, msg_id)
+    await dlq.send_to_dlq(event_id, event_type, payload, f"http_{resp.status_code}")
+    print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
+    return None
 
 async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, dlq: DlqManager):
     await ensure_group(r, stream)
