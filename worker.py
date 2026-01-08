@@ -131,7 +131,7 @@ async def process_message(
         return url
 
     duration = time.time() - now
-    print_msg(f"Processed [event={event_id}] type={event_type} duration={duration} status={resp.status_code}")
+    print_msg(f"Processed [event={event_id}] type={event_type} duration={duration:.3f} status={resp.status_code}")
 
     # success
     if 200 <= resp.status_code < 300:
