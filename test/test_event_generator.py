@@ -8,11 +8,12 @@ import os
 import random
 import string
 from datetime import datetime, UTC
-from typing import Set
 
+import urllib.request
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy import text
+
 
 # Configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -88,6 +89,16 @@ async def publish_event_to_redis(r: redis.Redis, event_id: int, event_type: str,
     
     return created_at
 
+def reprocess_dlq():
+    print("🔍 Reprocessing DLQ...", flush=True)
+    url = "http://worker:9000/reprocess-dlq?gt=0&lt=10000"
+    
+    try:
+        with urllib.request.urlopen(url) as resp:
+            print(f"Reprocessing DLQ status: {resp.status}", flush=True)
+            print(f"Reprocessing DLQ text:\n{resp.read().decode('utf-8')}", flush=True)
+    except Exception as e:
+        print(f"❌ Failed to reprocess DLQ: {e}", flush=True)
 
 async def event_generator(r: redis.Redis, engine: AsyncEngine):
     print(f"\n📤 Starting event generator ({NUM_EVENTS} events)...")
@@ -115,6 +126,10 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine):
 
     print(f"✅ Event generator completed - sent {NUM_EVENTS} events", flush=True)
 
+    await asyncio.sleep(5)
+    await asyncio.to_thread(reprocess_dlq)
+
+
     # Wait for HTTP server to process all events
     count = 0
     while count < 60:
@@ -130,6 +145,8 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine):
         exit(1)
     else:
         print(f"✅ All events sent: {OK} == {NUM_EVENTS}", flush=True)
+
+    await asyncio.sleep(5)
 
     # Check MySQL - events should be deleted after processing
     print("\n🔍 Checking MySQL database...", flush=True)

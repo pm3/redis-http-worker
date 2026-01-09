@@ -11,7 +11,7 @@ from aiohttp import web
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from metrics import event_age_seconds, event_processing_duration, events_processed, events_failed
-from dlq import DlqManager
+from dlq import DlqManagerDb, DlqManagerHttp, DlqManagerConsole, AbstractDlqManager
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -71,7 +71,6 @@ async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, 
     })
 
     await r.zadd("events:retry:delays", {retry_id: next_attempt_ts})
-    print_msg(f"Scheduled retry for event {meta['id']} in {delay} seconds")
 
 
 async def check_ready_host(http: httpx.AsyncClient, url: str) -> bool:
@@ -86,7 +85,7 @@ async def check_ready_host(http: httpx.AsyncClient, url: str) -> bool:
 async def process_message(
     r: redis.Redis,
     http: httpx.AsyncClient,
-    dlq: DlqManager,
+    dlq: AbstractDlqManager,
     stream: str,
     msg_id: str,
     fields: dict
@@ -149,7 +148,7 @@ async def process_message(
     if resp.status_code==400 and retry_time.isdigit():
         await r.xack(stream, GROUP, msg_id)
         await schedule_retry(r, stream, meta, payload, int(retry_time))
-        print_msg(f"scheduled retry [event={event_id}] type={event_type} status={resp.status_code} retry_time={retry_time}")
+        print_msg(f"scheduled retry [event={event_id}] type={event_type} retry_time={retry_time}")
         return None  
 
     # network retryable
@@ -164,7 +163,7 @@ async def process_message(
     print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
     return None
 
-async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, dlq: DlqManager):
+async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, dlq: AbstractDlqManager):
     await ensure_group(r, stream)
 
     consumer = f"{CONSUMER_PREFIX}-{stream}-{os.getpid()}"
@@ -235,10 +234,10 @@ async def scheduler_loop(r: redis.Redis):
             print(f"Scheduler loop failed: {e}", flush=True)
             await wait_for_redis(r)
 
-async def health(request):
+async def health(request: web.Request):
     return web.Response(text="{\"status\": \"ok\"}", headers={"Content-Type": "application/json"})
 
-async def metrics(request):
+async def metrics(request: web.Request):
     data = generate_latest()
     return web.Response(body=data, headers={"Content-Type": CONTENT_TYPE_LATEST})
 
@@ -255,6 +254,20 @@ async def main():
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/metrics", metrics)
+
+    dlq = None
+    DLQ_DB_CONNECTION = os.getenv("DLQ_DB_CONNECTION")
+    DLQ_DB_TABLE = os.getenv("DLQ_DB_TABLE")
+    if DLQ_DB_CONNECTION and DLQ_DB_TABLE:
+        dlq = DlqManagerDb(DLQ_DB_CONNECTION, DLQ_DB_TABLE, r)
+
+        # add reprocess-dlq endpoint - only for db dlq
+        async def reprocess_dlq(request: web.Request):
+            data = dict(request.query)
+            reprocess_log = await dlq.reprocess_dlq(data, "events:default")   
+            return web.Response(text="\n".join(reprocess_log), headers={"Content-Type": "text/plain"})
+        app.router.add_get("/reprocess-dlq", reprocess_dlq)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", METRICS_PORT)
@@ -264,7 +277,15 @@ async def main():
     timeout = httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT)
 
     async with httpx.AsyncClient(timeout=timeout) as http:
-        dlq = DlqManager(http)
+
+        # create dlq manager if not already created
+        if dlq is None:
+            DLQ_URI = os.getenv("DLQ_URI")
+            if DLQ_URI:
+                dlq = DlqManagerHttp(http, DLQ_URI)
+            else:
+                dlq = DlqManagerConsole()
+
         tasks = []
 
         # one consumer task per stream

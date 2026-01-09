@@ -39,9 +39,13 @@ async def http_handler(request: web.Request) -> web.Response:
     if akt == 276:
         print(f"✅ Simulated deployment: {count['ok']} = {event_id}", flush=True)
         exit(0)
-    if count["ok"] == 123:
+    if akt == 123:
         print(f"✅ Simulated retry-after: 20 = {event_id}", flush=True)
         return web.Response(status=400, text="ERROR: retry-after: 20", headers={"X-Retry-After": "20"})
+
+    if akt == 5:
+        print(f"✅ Simulated user error: 500 = {event_id}", flush=True)
+        return web.Response(status=500, text="ERROR: user error")
 
     print(f"✓ Received: id={event_id}, type={event_type}, payload_len={len(payload)}")
 
