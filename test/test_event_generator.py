@@ -16,8 +16,8 @@ from sqlalchemy import text
 
 
 # Configuration
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_HOST_PORT = os.getenv("REDIS_HOST_PORT", "redis:6379")
+REDIS_HOST, REDIS_PORT = REDIS_HOST_PORT.split(":")
 
 DB_CONNECTION = os.getenv("DB_CONNECTION", "mysql+aiomysql://zooza:zooza@localhost:3306/zooza")
 

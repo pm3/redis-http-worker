@@ -12,8 +12,8 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
 
 # Tracking
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_HOST_PORT = os.getenv("REDIS_HOST_PORT", "redis:6379")
+REDIS_HOST, REDIS_PORT = REDIS_HOST_PORT.split(":")
 redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 

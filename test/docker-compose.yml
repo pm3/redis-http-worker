@@ -52,8 +52,7 @@ services:
       mysql:
         condition: service_healthy
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - REDIS_HOST_PORT=redis:6379
       - METRICS_PORT=9000
       - DEFAULT_WORKER_URI=http://http-server:8000/events/[EVENT_TYPE]
       - DLQ_DB_CONNECTION=mysql+aiomysql://zooza:zooza@mysql:3306/zooza
@@ -69,8 +68,7 @@ services:
     build: .
     container_name: zooza-http-server
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - REDIS_HOST_PORT=redis:6379
       - SERVER_PORT=8000
     ports:
       - "8000:8000"
