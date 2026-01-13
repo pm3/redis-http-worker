@@ -13,7 +13,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from metrics import event_age_seconds, event_processing_duration, events_processed, events_failed
 from dlq import DlqManagerDb, DlqManagerHttp, DlqManagerConsole, AbstractDlqManager
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
