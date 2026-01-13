@@ -98,7 +98,7 @@ class DlqManagerDb(AbstractDlqManager):
                     meta = {"id": row[0], "type": row[1], "createdAt": datetime.now(UTC).isoformat()}
                     await conn.execute(self.sql_unmark_dlq, {"id": row[0]})
                     await self.redis.xadd(stream, {"meta": json.dumps(meta), "payload": row[2]})
-            conn.commit()
+            await conn.commit()
             reprocess_log.append("Committed changes")
         return reprocess_log
 
