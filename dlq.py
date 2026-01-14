@@ -55,7 +55,7 @@ class DlqManagerHttp(AbstractDlqManager):
 
 class DlqManagerDb(AbstractDlqManager):
     def __init__(self, connection: str, table: str, redis: redis.Redis):
-        self.engine = create_async_engine(connection)
+        self.engine = create_async_engine(connection, pool_pre_ping=True, pool_recycle=1800)
         self.table = table
         self.redis = redis
         self.sql_mark_dlq = text(f"UPDATE {table} SET dlq = 1 WHERE id = :id")

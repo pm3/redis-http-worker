@@ -234,6 +234,16 @@ async def scheduler_loop(r: redis.Redis):
             print(f"Scheduler loop failed: {e}", flush=True)
             await wait_for_redis(r)
 
+async def xtrim_schedule_loop(r: redis.Redis, streams: list[str]):
+    while not shutdown_event.is_set():
+        remove_id = (now_ts() - 8*3600) * 1000
+        for s in streams:
+            try:
+                await r.xtrim(s, minid=f"{remove_id}-0", approximate=True)
+            except Exception as e:
+                print(f"XTRIM failed for stream {s}: {e}", flush=True)
+        await asyncio.sleep(5*60.0)
+
 async def health(request: web.Request):
     return web.Response(text="{\"status\": \"ok\"}", headers={"Content-Type": "application/json"})
 
@@ -294,6 +304,9 @@ async def main():
 
         # scheduler task
         tasks.append(asyncio.create_task(scheduler_loop(r)))
+
+        # xtrim schedule task
+        tasks.append(asyncio.create_task(xtrim_schedule_loop(r, STREAMS)))
 
         await asyncio.gather(*tasks)
 
