@@ -126,6 +126,7 @@ async def process_message(
         print_msg(f"[event={event_id}] type={event_type} error: {e}")
         await r.xack(stream, GROUP, msg_id)
         await r.xadd(stream, {"meta": fields["meta"], "payload": fields["payload"]})
+        await r.xdel(stream, msg_id)
         events_failed.labels(stream=stream, type=event_type, reason=f"http_timeout_or_conn_error").inc()
         return url
 
@@ -135,6 +136,7 @@ async def process_message(
     # success
     if 200 <= resp.status_code < 300:
         await r.xack(stream, GROUP, msg_id)
+        await r.xdel(stream, msg_id)
         event_processing_duration.labels(type=event_type).observe(duration)
         events_processed.labels(stream=stream, type=event_type).inc()
         await dlq.clean_event(event_id)
@@ -148,6 +150,7 @@ async def process_message(
     if resp.status_code==400 and retry_time.isdigit():
         await r.xack(stream, GROUP, msg_id)
         await schedule_retry(r, stream, meta, payload, int(retry_time))
+        await r.xdel(stream, msg_id)
         print_msg(f"scheduled retry [event={event_id}] type={event_type} retry_time={retry_time}")
         return None  
 
@@ -155,11 +158,13 @@ async def process_message(
     if resp.status_code in RETRYABLE_NOT_AVAILABLE:
         await r.xack(stream, GROUP, msg_id)
         await r.xadd(stream, {"meta": json.dumps(meta), "payload": payload})
+        await r.xdel(stream, msg_id)
         return url
 
     # non-retryable
     await r.xack(stream, GROUP, msg_id)
     await dlq.send_to_dlq(event_id, event_type, payload, f"http_{resp.status_code}")
+    await r.xdel(stream, msg_id)
     print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
     return None
 
@@ -234,16 +239,6 @@ async def scheduler_loop(r: redis.Redis):
             print(f"Scheduler loop failed: {e}", flush=True)
             await wait_for_redis(r)
 
-async def xtrim_schedule_loop(r: redis.Redis, streams: list[str]):
-    while not shutdown_event.is_set():
-        remove_id = (now_ts() - 8*3600) * 1000
-        for s in streams:
-            try:
-                await r.xtrim(s, minid=f"{remove_id}-0", approximate=True)
-            except Exception as e:
-                print(f"XTRIM failed for stream {s}: {e}", flush=True)
-        await asyncio.sleep(5*60.0)
-
 async def health(request: web.Request):
     return web.Response(text="{\"status\": \"ok\"}", headers={"Content-Type": "application/json"})
 
@@ -304,9 +299,6 @@ async def main():
 
         # scheduler task
         tasks.append(asyncio.create_task(scheduler_loop(r)))
-
-        # xtrim schedule task
-        tasks.append(asyncio.create_task(xtrim_schedule_loop(r, STREAMS)))
 
         await asyncio.gather(*tasks)
 
