@@ -60,7 +60,7 @@ async def wait_for_redis(r: redis.Redis):
             if time_sleep < 10:
                 time_sleep+=1
 
-async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, delay: int):
+async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, delay: int, err_count: int):
 
     next_attempt_ts = now_ts() + delay
     meta["nextAttemptAt"] = next_attempt_ts
@@ -69,6 +69,7 @@ async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, 
         "meta": json.dumps(meta),
         "stream": stream,
         "payload": payload,
+        "err_count": str(err_count),
     })
 
     await r.zadd("events:retry:delays", {retry_id: next_attempt_ts})
@@ -150,9 +151,16 @@ async def process_message(
     retry_time = resp.headers.get("X-Retry-After", "")
     if resp.status_code==400 and retry_time.isdigit():
         await r.xack(stream, GROUP, msg_id)
-        await schedule_retry(r, stream, meta, payload, int(retry_time))
+        err_count = int(fields.get("err_count", "0")) + 1
+        if err_count >= 5:
+            print_msg(f"max retries reached [event={event_id}] type={event_type} status={resp.status_code}")
+            await dlq.send_to_dlq(event_id, event_type, payload, f"http_{resp.status_code}")
+            print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
+            return None
+        else:
+            await schedule_retry(r, stream, meta, payload, int(retry_time), err_count)
+            print_msg(f"scheduled retry [event={event_id}] type={event_type} retry_time={retry_time} err_count={err_count}")
         await r.xdel(stream, msg_id)
-        print_msg(f"scheduled retry [event={event_id}] type={event_type} retry_time={retry_time}")
         return None  
 
     # network retryable
@@ -235,11 +243,13 @@ async def scheduler_loop(r: redis.Redis):
                 meta = json.loads(fields["meta"])
                 stream = fields.get("stream", "events:default")
                 payload = fields.get("payload", "")
+                err_count = fields.get("err_count", "0")
 
                 print(f"Moved retry for event {meta['id']} to {stream}", flush=True)
                 await r.xadd(stream, {
                     "meta": json.dumps(meta),
-                    "payload": payload
+                    "payload": payload,
+                    "err_count": err_count
                 })            
                 await r.zrem("events:retry:delays", retry_id)
 
