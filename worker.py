@@ -7,6 +7,7 @@ import signal
 
 import httpx
 import redis.asyncio as redis
+from redis.exceptions import ResponseError
 from aiohttp import web
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
@@ -200,6 +201,13 @@ async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, d
                 for msg_id, fields in messages:
                     # ALWAYS process sequentially per stream:
                     wait_ready_host = await process_message(r, http, dlq, stream, msg_id, fields)
+
+        except ResponseError as e:
+            if "NOGROUP" in str(e):
+                try:
+                    await ensure_group(r, stream)
+                except Exception as e:
+                    print_msg(f"Failed to ensure group for stream {stream}: {e}")
 
         except Exception as e:
             print_msg(f"Failed to read message from stream {stream}: {e}")
