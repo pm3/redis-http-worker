@@ -208,6 +208,7 @@ async def consume_stream(stream: str, r: redis.Redis, http: httpx.AsyncClient, d
                     await ensure_group(r, stream)
                 except Exception as e:
                     print_msg(f"Failed to ensure group for stream {stream}: {e}")
+            await wait_for_redis(r)
 
         except Exception as e:
             print_msg(f"Failed to read message from stream {stream}: {e}")
@@ -259,9 +260,6 @@ async def main():
 
     # wait for redis to be ready
     await wait_for_redis(r)
-    # ensure groups exist upfront
-    for s in STREAMS:
-        await ensure_group(r, s)
 
     # start metrics server
     app = web.Application()

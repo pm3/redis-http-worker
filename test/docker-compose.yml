@@ -44,7 +44,9 @@ services:
       - zooza-network
 
   worker:
-    build: ../
+    build:
+      context: ../
+      dockerfile: Dockerfile
     container_name: zooza-worker
     depends_on:
       redis:
@@ -59,7 +61,6 @@ services:
       - DLQ_DB_TABLE=events
     ports:
       - "9000:9000"  # Prometheus metrics
-    command: python worker.py
     networks:
       - zooza-network
     restart: unless-stopped

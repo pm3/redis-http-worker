@@ -107,7 +107,7 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine):
     streams = ["events:critical", "events:fast", "events:default", "events:slow"]
     
     for i in range(NUM_EVENTS):
-        event_id = i
+        event_id = i + 1
         event_type = random.choice(event_types)
         data = json.dumps({
             "index": i,
@@ -115,14 +115,19 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine):
             "timestamp": datetime.now(UTC).isoformat()
         })
         stream = random.choice(streams)
-        
-        # Publish to Redis
-        created_at = await publish_event_to_redis(r, event_id, event_type, data, stream)
-        
-        # Insert to MySQL
-        await insert_event_to_mysql(engine, event_id, event_type, stream, data)
-        
-        print(f"✅ Sent event {i} of {NUM_EVENTS}", flush=True)
+
+        try:        
+            # Publish to Redis
+            created_at = await publish_event_to_redis(r, event_id, event_type, data, stream)
+            
+            # Insert to MySQL
+            await insert_event_to_mysql(engine, event_id, event_type, stream, data)
+            
+            print(f"✅ Sent event {i} of {NUM_EVENTS}", flush=True)
+        except Exception as e:
+            print(f"❌ Failed to send event {i}: {e}", flush=True)
+        await asyncio.sleep(0.2)
+
 
     print(f"✅ Event generator completed - sent {NUM_EVENTS} events", flush=True)
 
