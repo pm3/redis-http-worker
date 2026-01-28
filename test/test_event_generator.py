@@ -84,7 +84,8 @@ async def publish_event_to_redis(r: redis.Redis, event_id: int, event_type: str,
     
     await r.xadd(stream, {
         "meta": json.dumps(meta),
-        "payload": data
+        "payload": data,
+        "timeout": random.uniform(0.1, 10.0)
     })
     
     return created_at
@@ -126,7 +127,7 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine):
             print(f"✅ Sent event {i} of {NUM_EVENTS}", flush=True)
         except Exception as e:
             print(f"❌ Failed to send event {i}: {e}", flush=True)
-        await asyncio.sleep(0.2)
+        #await asyncio.sleep(0.2)
 
 
     print(f"✅ Event generator completed - sent {NUM_EVENTS} events", flush=True)

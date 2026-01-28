@@ -1,0 +1,1 @@
+docker run --rm -v "$PWD":/app -w /app golang:1.23-alpine sh -lc 'apk add --no-cache git && go mod download'
