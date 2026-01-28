@@ -60,7 +60,7 @@ async def wait_for_redis(r: redis.Redis):
             if time_sleep < 10:
                 time_sleep+=1
 
-async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, delay: int, err_count: int):
+async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, delay: int):
 
     next_attempt_ts = now_ts() + delay
     meta["nextAttemptAt"] = next_attempt_ts
@@ -69,7 +69,6 @@ async def schedule_retry(r: redis.Redis, stream: str, meta: dict, payload: str, 
         "meta": json.dumps(meta),
         "stream": stream,
         "payload": payload,
-        "err_count": str(err_count),
     })
 
     await r.zadd("events:retry:delays", {retry_id: next_attempt_ts})
@@ -98,6 +97,13 @@ async def process_message(
     event_id = str(meta["id"]) if "id" in meta else None
     payload = fields.get("payload", "")
     event_type = meta.get("type", "unknown")
+    custom_timeout = None
+    if "timeout" in fields:
+        try:
+            timeout_number = float(fields["timeout"])
+            custom_timeout = httpx.Timeout(timeout_number, connect=CONNECT_TIMEOUT)
+        except ValueError:
+            custom_timeout = None
 
     if "createdAt" in meta:
         event_created_at = datetime.datetime.fromisoformat(meta["createdAt"])
@@ -122,6 +128,7 @@ async def process_message(
             url,
             content=payload.encode("utf-8"),  # if payload is text
             headers=headers,
+            timeout=custom_timeout,
         )
     except Exception as e:
         # retryable
@@ -134,6 +141,7 @@ async def process_message(
 
     duration = time.time() - now
     print_msg(f"Processed [event={event_id}] type={event_type} duration={duration:.3f} status={resp.status_code}")
+    err_count_key = f"err_count:{stream}:{event_id}"
 
     # success
     if 200 <= resp.status_code < 300:
@@ -142,6 +150,7 @@ async def process_message(
         event_processing_duration.labels(type=event_type).observe(duration)
         events_processed.labels(stream=stream, type=event_type).inc()
         await dlq.clean_event(event_id)
+        await r.delete(err_count_key)
         return None
 
     print_msg(f"Error response [event={event_id}]: {resp.status_code}\\n{resp.text.replace('\n', '\\n').replace('\r', '')}")
@@ -151,14 +160,15 @@ async def process_message(
     retry_time = resp.headers.get("X-Retry-After", "")
     if resp.status_code==400 and retry_time.isdigit():
         await r.xack(stream, GROUP, msg_id)
-        err_count = int(fields.get("err_count", "0")) + 1
+        err_count = await r.incr(err_count_key)
         if err_count >= 5:
             print_msg(f"max retries reached [event={event_id}] type={event_type} status={resp.status_code}")
             await dlq.send_to_dlq(event_id, event_type, payload, f"http_{resp.status_code}")
+            await r.delete(err_count_key)
             print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
             return None
         else:
-            await schedule_retry(r, stream, meta, payload, int(retry_time), err_count)
+            await schedule_retry(r, stream, meta, payload, int(retry_time))
             print_msg(f"scheduled retry [event={event_id}] type={event_type} retry_time={retry_time} err_count={err_count}")
         await r.xdel(stream, msg_id)
         return None  
@@ -174,6 +184,7 @@ async def process_message(
     await r.xack(stream, GROUP, msg_id)
     await dlq.send_to_dlq(event_id, event_type, payload, f"http_{resp.status_code}")
     await r.xdel(stream, msg_id)
+    await r.delete(err_count_key)
     print_msg(f"sent to DLQ [event={event_id}] type={event_type} status={resp.status_code}")
     return None
 
@@ -243,13 +254,11 @@ async def scheduler_loop(r: redis.Redis):
                 meta = json.loads(fields["meta"])
                 stream = fields.get("stream", "events:default")
                 payload = fields.get("payload", "")
-                err_count = fields.get("err_count", "0")
 
                 print(f"Moved retry for event {meta['id']} to {stream}", flush=True)
                 await r.xadd(stream, {
                     "meta": json.dumps(meta),
                     "payload": payload,
-                    "err_count": err_count
                 })            
                 await r.zrem("events:retry:delays", retry_id)
 
@@ -258,12 +267,21 @@ async def scheduler_loop(r: redis.Redis):
             print(f"Scheduler loop failed: {e}", flush=True)
             await wait_for_redis(r)
 
-async def health(request: web.Request):
-    return web.Response(text="{\"status\": \"ok\"}", headers={"Content-Type": "application/json"})
+async def redis_metrics(r: redis.Redis):
+    lines = []
+    lines.append("# HELP php_events_total Event counts stored in Redis by PHP")
+    lines.append("# TYPE php_events_total counter")
+    cursor = 0
+    while True:
+        cursor, keys = await r.scan(cursor=cursor, match="metric:*", count=100)
+        values = await r.mget(keys)
+        for key, value in zip(keys, values):
+            key = key.replace("metric:", "")
+            lines.append(f"php_events_total{{type=\"{key}\"}} {int(value)}")
+        if cursor == 0:
+            break
 
-async def metrics(request: web.Request):
-    data = generate_latest()
-    return web.Response(body=data, headers={"Content-Type": CONTENT_TYPE_LATEST})
+    return "\n".join(lines).encode("utf-8")
 
 async def main():
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, decode_responses=True)
@@ -273,9 +291,20 @@ async def main():
 
     # start metrics server
     app = web.Application()
+
+    # health endpoint
+    async def health(request: web.Request):
+        return web.Response(text="{\"status\": \"ok\"}", headers={"Content-Type": "application/json"})
     app.router.add_get("/health", health)
+
+    # metrics endpoint
+    async def metrics(request: web.Request):
+        data = generate_latest()
+        redis_data = await redis_metrics(r)
+        return web.Response(body=data + redis_data, headers={"Content-Type": CONTENT_TYPE_LATEST})
     app.router.add_get("/metrics", metrics)
 
+    # create dlq manager if not already created
     dlq = None
     DLQ_DB_CONNECTION = os.getenv("DLQ_DB_CONNECTION")
     DLQ_DB_TABLE = os.getenv("DLQ_DB_TABLE")
@@ -295,7 +324,7 @@ async def main():
     await site.start()
     print_msg(f"Server running on :{METRICS_PORT}")
 
-    timeout = httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT)
+    timeout = httpx.Timeout(READ_TIMEOUT, connect=CONNECT_TIMEOUT)
 
     async with httpx.AsyncClient(timeout=timeout) as http:
 
