@@ -18,4 +18,4 @@ COPY --from=builder /app/.venv /app/.venv
 COPY *.py pyproject.toml uv.lock* ./
 
 ENV PATH="/app/.venv/bin:$PATH"
-CMD ["python", "worker.py"]
+CMD ["python", "main.py"]
