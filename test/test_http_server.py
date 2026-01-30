@@ -49,6 +49,9 @@ async def http_handler(request: web.Request) -> web.Response:
 
     print(f"✓ Received: id={event_id}, type={event_type}, payload_len={len(payload)}")
 
+    if payload == "retry":
+        return web.Response(status=503, text="ERROR: retry")
+
     #await asyncio.sleep(0.05)
     #zapis do redis counteru ok
     await redis.incr("http_server:ok")  

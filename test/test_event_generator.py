@@ -116,6 +116,9 @@ async def event_generator(r: redis.Redis, engine: AsyncEngine):
         })
         stream = random.choice(streams)
 
+        if i == 5:
+            data = "retry"
+
         try:        
             # Publish to Redis
             created_at = await publish_event_to_redis(r, event_id, event_type, data, stream)
